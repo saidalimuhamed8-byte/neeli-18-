@@ -6,13 +6,14 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
 )
+from telegram.ext.asgi import ASGIApplication
 from telegram.error import BadRequest
 
 # ---------------- CONFIG ----------------
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # Channel username or ID
 
 if not all([TOKEN, ADMIN_ID, LOG_CHANNEL, CHANNEL_ID]):
     print("❌ Missing environment variables!")
@@ -45,7 +46,10 @@ def get_videos(category):
 # ---------------- HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, first_name) VALUES (?, ?)", (user.id, user.first_name))
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id, first_name) VALUES (?, ?)",
+        (user.id, user.first_name)
+    )
     conn.commit()
     if LOG_CHANNEL:
         await context.bot.send_message(LOG_CHANNEL, f"👤 New user: {user.first_name} ({user.id})")
@@ -100,11 +104,13 @@ async def send_videos(update, context):
     start, end = page*10, (page+1)*10
     batch = videos[start:end]
     media = [InputMediaVideo(file_id=file_id) for _, file_id in batch]
+
     if update.message:
         await update.message.reply_media_group(media)
     else:
         await update.callback_query.message.reply_media_group(media)
 
+    # Pagination
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅ Previous", callback_data="prev"))
@@ -176,23 +182,25 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.execv(sys.executable, ["python"] + sys.argv)
 
 # ---------------- APPLICATION ----------------
-# This is the ASGI app object for uvicorn
-app = ApplicationBuilder().token(TOKEN).build()
+ptb_app = ApplicationBuilder().token(TOKEN).build()
 
 # User commands
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(age_confirm, pattern="age_confirm"))
-app.add_handler(CallbackQueryHandler(category_select, pattern="cat_"))
-app.add_handler(CallbackQueryHandler(paginate, pattern="^(next|prev)$"))
-app.add_handler(CommandHandler("verify", verify_and_send))
+ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(CallbackQueryHandler(age_confirm, pattern="age_confirm"))
+ptb_app.add_handler(CallbackQueryHandler(category_select, pattern="cat_"))
+ptb_app.add_handler(CallbackQueryHandler(paginate, pattern="^(next|prev)$"))
+ptb_app.add_handler(CommandHandler("verify", verify_and_send))
 
 # Video management
-app.add_handler(CommandHandler("addvideo", add_video))
-app.add_handler(CommandHandler("bulkadd", bulk_add))
-app.add_handler(CommandHandler("done", bulk_done))
-app.add_handler(CommandHandler("removevideo", remove_video))
-app.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, bulk_receive))
+ptb_app.add_handler(CommandHandler("addvideo", add_video))
+ptb_app.add_handler(CommandHandler("bulkadd", bulk_add))
+ptb_app.add_handler(CommandHandler("done", bulk_done))
+ptb_app.add_handler(CommandHandler("removevideo", remove_video))
+ptb_app.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, bulk_receive))
 
 # Admin
-app.add_handler(CommandHandler("stats", stats))
-app.add_handler(CommandHandler("restart", restart))
+ptb_app.add_handler(CommandHandler("stats", stats))
+ptb_app.add_handler(CommandHandler("restart", restart))
+
+# Wrap PTB app for ASGI (Uvicorn)
+app = ASGIApplication(ptb_app)
