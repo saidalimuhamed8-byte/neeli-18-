@@ -12,7 +12,7 @@ from telegram.error import BadRequest
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "")  # keep as string for t.me link
 PORT = int(os.environ.get("PORT", 8000))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
@@ -41,13 +41,19 @@ conn.commit()
 
 # ---------------- HELPERS ----------------
 def get_videos(category):
-    cursor.execute("SELECT id, file_id FROM videos WHERE category=? ORDER BY id DESC", (category,))
+    cursor.execute(
+        "SELECT id, file_id FROM videos WHERE category=? ORDER BY id DESC",
+        (category,)
+    )
     return cursor.fetchall()
 
 # ---------------- HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, first_name) VALUES (?, ?)", (user.id, user.first_name))
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id, first_name) VALUES (?, ?)",
+        (user.id, user.first_name)
+    )
     conn.commit()
     if LOG_CHANNEL:
         await context.bot.send_message(LOG_CHANNEL, f"👤 New user: {user.first_name} ({user.id})")
@@ -83,7 +89,7 @@ async def category_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def verify_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
-        member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
+        member = await context.bot.get_chat_member(int(CHANNEL_ID), user.id)
         if member.status in ["member", "administrator", "creator"]:
             await send_videos(update, context)
         else:
@@ -200,9 +206,10 @@ app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("restart", restart))
 
 # ---------------- RUN WEBHOOK ----------------
-app.run_webhook(
-    listen="0.0.0.0",
-    port=PORT,
-    url_path=TOKEN,
-    webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-)
+if __name__ == "__main__":
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+    )
