@@ -11,7 +11,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 
 # ------------ CONFIG ------------
-TOKEN = os.environ["BOT_TOKEN"]  # must be set in hosting env
+TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 LOG_CHANNEL = int(os.environ["LOG_CHANNEL"])
 CHANNEL_ID = int(os.environ["CHANNEL_ID"])
@@ -226,8 +226,13 @@ app.add_handler(CommandHandler("restart", restart))
 # Join requests
 app.add_handler(ChatJoinRequestHandler(join_request, CHANNEL_ID))
 
-# Run as web service (important!)
+# ------------ RUN WEB SERVICE ------------
 if WEBHOOK_URL:
-    app.run_webhook(port=PORT, url_path=TOKEN, webhook_url=f"{WEBHOOK_URL}/{TOKEN"], listen="0.0.0.0")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+    )
 else:
     app.run_polling()
