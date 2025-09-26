@@ -3,39 +3,37 @@ import sqlite3
 import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
-    Application, AsgiApplication, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ChatMemberHandler, ContextTypes, filters
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    filters, ContextTypes, ChatMemberHandler
 )
 from telegram.error import BadRequest
 
-# ---------- Config ----------
+# ---------------- CONFIG ----------------
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g. https://yourapp.onrender.com
-ADMIN_IDS = [8301447343]
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+PORT = int(os.environ.get("PORT", 8000))
+ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
 DB_FILE = "bot.db"
-LOG_CHANNEL_ID = -1002871565651
+LOG_CHANNEL_ID = -1002871565651  # Replace with your log channel ID
 
-if not TOKEN or not WEBHOOK_URL:
-    raise ValueError("❌ BOT_TOKEN and WEBHOOK_URL must be set!")
-
-# ---------- Logging ----------
+# ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- Database ----------
+# ---------------- DATABASE ----------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS chats (chat_id INTEGER PRIMARY KEY, type TEXT)")
     cur.execute("CREATE TABLE IF NOT EXISTS videos (category TEXT, file_id TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS fsub_channel (id INTEGER PRIMARY KEY AUTOINCREMENT, invite_link TEXT)")
     cur.execute("CREATE TABLE IF NOT EXISTS stats_shown (user_id INTEGER PRIMARY KEY)")
+    cur.execute("CREATE TABLE IF NOT EXISTS fsub_channel (id INTEGER PRIMARY KEY AUTOINCREMENT, invite_link TEXT)")
     conn.commit()
     conn.close()
 
 init_db()
 
-# ---------- Helpers ----------
+# ---------------- HELPERS ----------------
 def save_chat(chat_id, chat_type):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -53,10 +51,10 @@ def add_video(category, file_id):
 def remove_video(category, index):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute("SELECT rowid FROM videos WHERE category = ?", (category,))
+    cur.execute("SELECT rowid, file_id FROM videos WHERE category = ?", (category,))
     rows = cur.fetchall()
     if 0 <= index < len(rows):
-        rowid = rows[index][0]
+        rowid, _ = rows[index]
         cur.execute("DELETE FROM videos WHERE rowid = ?", (rowid,))
         conn.commit()
         conn.close()
@@ -103,7 +101,7 @@ async def send_join_prompt(update, context):
         await update.callback_query.message.reply_text("⚠️ Please join the channel first:", reply_markup=kb)
     return True
 
-# ---------- Handlers ----------
+# ---------------- HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id, update.effective_chat.type)
     categories = ["mallu", "latest", "desi"]
@@ -116,57 +114,62 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
 
     if query.data == "continue":
+        user_data["joined"] = True
         if "pending_category" in user_data:
             category = user_data.pop("pending_category")
-            await send_videos(query, context, category, 0)
+            await send_videos_after_join(query, context, category, 0)
         return
 
     if ":" in query.data:
         category, page_str = query.data.split(":")
         page = int(page_str)
-        if "joined_version" not in user_data or user_data.get("joined_version") != get_fsub_channel():
+        if not user_data.get("joined") and get_fsub_channel():
             user_data["pending_category"] = category
             await send_join_prompt(update, context)
         else:
-            await send_videos(query, context, category, page)
+            await send_videos_after_join(query, context, category, page)
 
-async def send_videos(update_or_query, context, category, page):
+async def send_videos_after_join(query, context, category, page):
     videos = get_videos(category)
     if not videos:
-        await (update_or_query.message or update_or_query).reply_text("⚠️ No videos in this category.")
+        await query.message.reply_text("⚠️ No videos available in this category.")
         return
 
     start_idx, end_idx = page * 10, (page + 1) * 10
     chunk = videos[start_idx:end_idx]
-    media_group = [InputMediaVideo(file_id) for file_id in chunk]
+    media_group = [InputMediaVideo(vid) for vid in chunk]
     try:
-        await context.bot.send_media_group(chat_id=update_or_query.from_user.id, media=media_group)
+        await context.bot.send_media_group(chat_id=query.from_user.id, media=media_group)
     except BadRequest:
         for vid in chunk:
-            await context.bot.send_video(chat_id=update_or_query.from_user.id, video=vid)
+            await context.bot.send_video(chat_id=query.from_user.id, video=vid)
 
     buttons = []
     if page > 0:
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
     if end_idx < len(videos):
         buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{category}:{page+1}"))
-    if buttons:
-        await context.bot.send_message(chat_id=update_or_query.from_user.id, text="📺 Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
 
+    if buttons:
+        await context.bot.send_message(chat_id=query.from_user.id, text="📺 Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
+
+# ---------------- ADMIN COMMANDS ----------------
 async def add_video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS: return
-    if len(context.args) != 1: 
+    if update.effective_user.id not in ADMIN_IDS:
+        return await update.message.reply_text("⛔ Not authorized")
+    if len(context.args) != 1:
         return await update.message.reply_text("Usage: /addvideo <category>")
     context.user_data["adding_category"] = context.args[0]
-    await update.message.reply_text(f"📤 Send a video to add to `{context.args[0]}`")
+    await update.message.reply_text(f"📤 Send a video to add to `{context.args[0]}`", parse_mode="Markdown")
 
 async def bulkadd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS: return
-    if len(context.args) != 1: 
+    if update.effective_user.id not in ADMIN_IDS:
+        return await update.message.reply_text("⛔ Not authorized")
+    if len(context.args) != 1:
         return await update.message.reply_text("Usage: /bulkadd <category>")
     context.user_data["bulk_category"] = context.args[0]
     context.user_data["bulk_mode"] = True
-    await update.message.reply_text(f"📤 Bulk mode started for `{context.args[0]}`. Send videos, then /done")
+    await update.message.reply_text(f"📤 Bulk mode started for `{context.args[0]}`. Send videos, then /done", parse_mode="Markdown")
 
 async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("bulk_mode"):
@@ -178,27 +181,29 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "adding_category" in context.user_data:
         category = context.user_data.pop("adding_category")
         add_video(category, update.message.video.file_id)
-        await update.message.reply_text(f"✅ Video added to `{category}`")
+        await update.message.reply_text(f"✅ Video added to `{category}`", parse_mode="Markdown")
     elif context.user_data.get("bulk_mode"):
         category = context.user_data["bulk_category"]
         add_video(category, update.message.video.file_id)
 
 async def removevideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS: return
+    if update.effective_user.id not in ADMIN_IDS:
+        return await update.message.reply_text("⛔ Not authorized")
     if len(context.args) != 2 or not context.args[1].isdigit():
         return await update.message.reply_text("Usage: /removevideo <category> <index>")
     category, index = context.args[0], int(context.args[1])
     if remove_video(category, index):
-        await update.message.reply_text(f"🗑️ Removed video {index} from `{category}`")
+        await update.message.reply_text(f"🗑️ Removed video {index} from `{category}`", parse_mode="Markdown")
     else:
         await update.message.reply_text("⚠️ Invalid category or index")
 
 async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS: return
+    if update.effective_user.id not in ADMIN_IDS:
+        return await update.message.reply_text("⛔ Not authorized")
     if len(context.args) != 1:
         return await update.message.reply_text("Usage: /fsub <invite_link>")
     set_fsub_channel(context.args[0])
-    await update.message.reply_text(f"✅ Force sub channel set to `{context.args[0]}`")
+    await update.message.reply_text(f"✅ Force sub channel set to `{context.args[0]}`", parse_mode="Markdown")
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -218,8 +223,8 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.chat_member.chat.id, update.chat_member.chat.type)
 
-# ---------- ASGI Bot ----------
-app: AsgiApplication = Application.builder().token(TOKEN).build()
+# ---------------- RUN ----------------
+app = Application.builder().token(TOKEN).build()
 
 # Handlers
 app.add_handler(CommandHandler("start", start))
@@ -233,8 +238,8 @@ app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(MessageHandler(filters.VIDEO, video_handler))
 app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
-# Set webhook on startup
-@app.on_startup
-async def set_webhook(app):
-    url = f"{WEBHOOK_URL}/{TOKEN}"
-    await app.bot.set_webhook(url)
+# Webhook setup
+if WEBHOOK_URL:
+    @app.on_startup
+    async def set_webhook(application):
+        await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
