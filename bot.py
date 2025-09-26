@@ -1,9 +1,7 @@
 import os
 import sys
 import sqlite3
-from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
-)
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
@@ -62,14 +60,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def age_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    keyboard = [
-        [InlineKeyboardButton("Mallu", callback_data="cat_Mallu")],
-        [InlineKeyboardButton("Desi", callback_data="cat_Desi")],
-        [InlineKeyboardButton("Trending", callback_data="cat_Trending")],
-        [InlineKeyboardButton("Latest", callback_data="cat_Latest")],
-        [InlineKeyboardButton("Premium", callback_data="cat_Premium")]
-    ]
-    await query.edit_message_text("✅ Age confirmed!\n\nSelect a category:", reply_markup=InlineKeyboardMarkup(keyboard))
+    categories = ["Mallu", "Desi", "Trending", "Latest", "Premium"]
+    keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in categories]
+    await query.edit_message_text(
+        "✅ Age confirmed!\n\nSelect a category:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def category_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -99,18 +95,21 @@ async def send_videos(update, context):
     category = context.user_data.get("category", "general")
     videos = get_videos(category)
     if not videos:
-        await update.message.reply_text("⚠️ No videos in this category.")
+        await (update.message or update.callback_query.message).reply_text("⚠️ No videos in this category.")
         return
+
     page = context.user_data.get("page", 0)
     start, end = page*10, (page+1)*10
     batch = videos[start:end]
-    media = [InputMediaVideo(file_id) for _, file_id in batch]
+    media = [InputMediaVideo(file_id=file_id) for _, file_id in batch]
     if update.message:
         await update.message.reply_media_group(media)
     else:
         await update.callback_query.message.reply_media_group(media)
+
+    # Pagination buttons
     buttons = []
-    if page>0:
+    if page > 0:
         buttons.append(InlineKeyboardButton("⬅ Previous", callback_data="prev"))
     if end < len(videos):
         buttons.append(InlineKeyboardButton("Next ➡", callback_data="next"))
@@ -123,12 +122,12 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "next":
-        context.user_data["page"] = context.user_data.get("page", 0)+1
+        context.user_data["page"] = context.user_data.get("page", 0) + 1
     elif query.data == "prev":
-        context.user_data["page"] = context.user_data.get("page", 0)-1
+        context.user_data["page"] = context.user_data.get("page", 0) - 1
     await send_videos(update, context)
 
-# ---------------- ADMIN ----------------
+# ---------------- ADMIN COMMANDS ----------------
 async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not update.message.video:
@@ -182,6 +181,7 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------- APPLICATION ----------------
 app = ApplicationBuilder().token(TOKEN).build()
 
+# User commands
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(age_confirm, pattern="age_confirm"))
 app.add_handler(CallbackQueryHandler(category_select, pattern="cat_"))
@@ -206,4 +206,3 @@ app.run_webhook(
     url_path=TOKEN,
     webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
 )
-
