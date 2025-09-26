@@ -1,35 +1,35 @@
 import os
 import sqlite3
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
-    ChatMemberHandler,
     MessageHandler,
-    filters
+    ChatMemberHandler,
+    ContextTypes,
+    filters,
 )
 from telegram.error import BadRequest
 
-# ---------------- CONFIG ----------------
+# ---------- Config ----------
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://yourdomain.com
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8000))
 
-ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
+ADMIN_IDS = [8301447343]  # Replace with your Telegram ID
 DB_FILE = "bot.db"
 LOG_CHANNEL_ID = -1002871565651  # Replace with your log channel ID
 
-# ---------------- Logging ----------------
+# ---------- Logging ----------
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ---------------- Database ----------------
+# ---------- Database ----------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -39,10 +39,9 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS fsub_channel (id INTEGER PRIMARY KEY AUTOINCREMENT, invite_link TEXT)")
     conn.commit()
     conn.close()
-
 init_db()
 
-# ---------------- Fsub helpers ----------------
+# ---------- Fsub helpers ----------
 def set_fsub_channel(invite_link: str):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -74,7 +73,7 @@ async def send_join_prompt(update, context):
         await update.callback_query.message.reply_text("⚠️ Please join the channel first:", reply_markup=kb)
     return True
 
-# ---------------- Chat tracking ----------------
+# ---------- Chat tracking ----------
 def save_chat(chat_id, chat_type):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -82,7 +81,7 @@ def save_chat(chat_id, chat_type):
     conn.commit()
     conn.close()
 
-# ---------------- Video helpers ----------------
+# ---------- Video helpers ----------
 def add_video(category, file_id):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -112,7 +111,7 @@ def get_videos(category):
     conn.close()
     return [r[0] for r in rows]
 
-# ---------------- Handlers ----------------
+# ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.effective_chat.id, update.effective_chat.type)
     categories = ["mallu", "latest", "desi"]
@@ -125,8 +124,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
 
     if query.data == "continue":
-        fsub_version, _ = get_fsub_channel()
-        user_data["joined_version"] = fsub_version
+        _, _ = get_fsub_channel()
+        user_data["joined_version"] = True
         if "pending_category" in user_data:
             category = user_data.pop("pending_category")
             await send_videos_after_join(query, context, category, 0)
@@ -135,8 +134,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ":" in query.data:
         category, page_str = query.data.split(":")
         page = int(page_str)
-        fsub_version, _ = get_fsub_channel()
-        if user_data.get("joined_version") != fsub_version:
+
+        if not user_data.get("joined_version"):
             user_data["pending_category"] = category
             await send_join_prompt(update, context)
         else:
@@ -148,10 +147,9 @@ async def send_videos_after_join(query, context, category, page):
         await query.message.reply_text("⚠️ No videos available in this category.")
         return
 
-    start_idx, end_idx = page*10, (page+1)*10
+    start_idx, end_idx = page * 10, (page + 1) * 10
     chunk = videos[start_idx:end_idx]
     media_group = [InputMediaVideo(vid) for vid in chunk]
-
     try:
         await context.bot.send_media_group(chat_id=query.from_user.id, media=media_group)
     except BadRequest:
@@ -163,7 +161,6 @@ async def send_videos_after_join(query, context, category, page):
         buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
     if end_idx < len(videos):
         buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{category}:{page+1}"))
-
     if buttons:
         await context.bot.send_message(chat_id=query.from_user.id, text="📺 Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
 
@@ -232,9 +229,9 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM chats WHERE type='private'")
+    cur.execute("SELECT COUNT(*) FROM chats WHERE type = 'private'")
     user_count = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM chats WHERE type!='private'")
+    cur.execute("SELECT COUNT(*) FROM chats WHERE type != 'private'")
     group_count = cur.fetchone()[0]
     conn.close()
 
@@ -249,8 +246,8 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_chat(update.chat_member.chat.id, update.chat_member.chat.type)
 
-# ---------------- Main ----------------
-def main():
+# ---------- Main ----------
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     # Handlers
@@ -266,18 +263,14 @@ def main():
     app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
     if WEBHOOK_URL:
-        import asyncio
-        # Manually set webhook before running
-        asyncio.run(app.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}"))
-
-        app.run_webhook(
+        await app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
             webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
         )
     else:
-        app.run_polling()
+        await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
