@@ -5,279 +5,232 @@ from telegram import (
     Update,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InputMediaVideo,
+    InputMediaVideo
 )
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
-    ChatMemberHandler,
     MessageHandler,
     filters,
+    ContextTypes
 )
 from telegram.error import BadRequest
 
 # ---------------- CONFIG ----------------
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://<your-domain>.onrender.com
 PORT = int(os.environ.get("PORT", 8000))
 
-ADMIN_IDS = [8301447343]  # Replace with your Telegram user ID
+ADMIN_IDS = [8301447343]  # replace with your ID
 DB_FILE = "bot.db"
-LOG_CHANNEL_ID = -1002871565651  # Replace with your log channel ID
+LOG_CHANNEL = -1002871565651  # replace with your log channel ID
 
 # ---------------- LOGGING ----------------
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------- DATABASE ----------------
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS chats (chat_id INTEGER PRIMARY KEY, type TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS videos (category TEXT, file_id TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS stats_shown (user_id INTEGER PRIMARY KEY)")
-    cur.execute("CREATE TABLE IF NOT EXISTS fsub_channel (id INTEGER PRIMARY KEY AUTOINCREMENT, invite_link TEXT)")
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    first_name TEXT
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT,
+    file_id TEXT
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS fsub_channel (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invite_link TEXT
+)
+""")
+conn.commit()
+
+# ---------------- HELPERS ----------------
+def add_video_to_db(category, file_id):
+    cursor.execute("INSERT INTO videos (category, file_id) VALUES (?, ?)", (category, file_id))
     conn.commit()
-    conn.close()
-
-init_db()
-
-# ---------------- Fsub helpers ----------------
-def set_fsub_channel(invite_link: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM fsub_channel")
-    cur.execute("INSERT INTO fsub_channel (invite_link) VALUES (?)", (invite_link,))
-    conn.commit()
-    conn.close()
-
-def get_fsub_channel():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT id, invite_link FROM fsub_channel ORDER BY id DESC LIMIT 1")
-    row = cur.fetchone()
-    conn.close()
-    return row if row else (0, None)  # (id, invite_link)
-
-async def send_join_prompt(update, context):
-    _, invite_link = get_fsub_channel()
-    if not invite_link:
-        return False
-    keyboard = [
-        [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-        [InlineKeyboardButton("✅ I Joined / Continue", callback_data="continue")]
-    ]
-    kb = InlineKeyboardMarkup(keyboard)
-    if update.message:
-        await update.message.reply_text("⚠️ Please join the channel first:", reply_markup=kb)
-    elif update.callback_query:
-        await update.callback_query.message.reply_text("⚠️ Please join the channel first:", reply_markup=kb)
-    return True
-
-# ---------------- CHAT TRACKING ----------------
-def save_chat(chat_id, chat_type):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO chats (chat_id, type) VALUES (?, ?)", (chat_id, chat_type))
-    conn.commit()
-    conn.close()
-
-# ---------------- VIDEO HELPERS ----------------
-def add_video(category, file_id):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("INSERT INTO videos (category, file_id) VALUES (?, ?)", (category, file_id))
-    conn.commit()
-    conn.close()
-
-def remove_video(category, index):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT rowid, file_id FROM videos WHERE category = ?", (category,))
-    rows = cur.fetchall()
-    if 0 <= index < len(rows):
-        rowid, _ = rows[index]
-        cur.execute("DELETE FROM videos WHERE rowid = ?", (rowid,))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
-    return False
 
 def get_videos(category):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT file_id FROM videos WHERE category = ?", (category,))
-    rows = cur.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+    cursor.execute("SELECT file_id FROM videos WHERE category=? ORDER BY id DESC", (category,))
+    return [r[0] for r in cursor.fetchall()]
+
+def set_fsub_channel(invite_link):
+    cursor.execute("DELETE FROM fsub_channel")
+    cursor.execute("INSERT INTO fsub_channel (invite_link) VALUES (?)", (invite_link,))
+    conn.commit()
+
+def get_fsub_channel():
+    cursor.execute("SELECT invite_link FROM fsub_channel ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 # ---------------- HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.effective_chat.id, update.effective_chat.type)
-    categories = ["mallu", "latest", "desi"]
-    keyboard = [[InlineKeyboardButton(cat.title(), callback_data=f"{cat}:0")] for cat in categories]
-    await update.message.reply_text("📂 Choose a category:", reply_markup=InlineKeyboardMarkup(keyboard))
+    user = update.effective_user
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, first_name) VALUES (?, ?)", (user.id, user.first_name))
+    conn.commit()
+    if LOG_CHANNEL:
+        await context.bot.send_message(LOG_CHANNEL, f"👤 New user: {user.first_name} ({user.id})")
+    categories = ["Mallu", "Desi", "Trending", "Latest", "Premium"]
+    keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in categories]
+    await update.message.reply_text(
+        "Welcome 🔥\nSelect a category to start:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def category_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = query.data.replace("cat_", "")
+    context.user_data["category"] = category
+    context.user_data["page"] = 0
+    invite_link = get_fsub_channel()
+    if invite_link:
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
+            [InlineKeyboardButton("✅ I Joined / Continue", callback_data="continue")]
+        ]
+        await query.edit_message_text("⚠️ Please join the channel first:", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await send_videos(update, context)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_data = context.user_data
 
     if query.data == "continue":
-        _, invite_link = get_fsub_channel()
-        user_data["joined_version"] = _  # mark user as joined
-        if "pending_category" in user_data:
-            category = user_data.pop("pending_category")
-            await send_videos_after_join(query, context, category, 0)
+        category = context.user_data.get("category")
+        await send_videos(update, context)
         return
 
     if ":" in query.data:
-        category, page_str = query.data.split(":")
-        page = int(page_str)
-        _, _ = get_fsub_channel()
-        if user_data.get("joined_version") != _:
-            user_data["pending_category"] = category
-            await send_join_prompt(update, context)
-        else:
-            await send_videos_after_join(query, context, category, page)
+        category, page = query.data.split(":")
+        context.user_data["category"] = category
+        context.user_data["page"] = int(page)
+        await send_videos(update, context)
 
-async def send_videos_after_join(query, context, category, page):
+async def send_videos(update, context):
+    category = context.user_data.get("category", "general")
+    page = context.user_data.get("page", 0)
     videos = get_videos(category)
     if not videos:
-        await query.message.reply_text("⚠️ No videos available in this category.")
+        await (update.message or update.callback_query.message).reply_text("⚠️ No videos available.")
         return
 
     start_idx, end_idx = page*10, (page+1)*10
-    chunk = videos[start_idx:end_idx]
-    media_group = [InputMediaVideo(vid) for vid in chunk]
-    try:
-        await context.bot.send_media_group(chat_id=query.from_user.id, media=media_group)
-    except BadRequest:
-        for vid in chunk:
-            await context.bot.send_video(chat_id=query.from_user.id, video=vid)
+    batch = videos[start_idx:end_idx]
+    media = [InputMediaVideo(file_id=vid) for vid in batch]
+
+    if update.message:
+        await update.message.reply_media_group(media)
+    else:
+        await update.callback_query.message.reply_media_group(media)
 
     buttons = []
     if page > 0:
-        buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"{category}:{page-1}"))
+        buttons.append(InlineKeyboardButton("⬅ Previous", callback_data=f"{category}:{page-1}"))
     if end_idx < len(videos):
-        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{category}:{page+1}"))
+        buttons.append(InlineKeyboardButton("Next ➡", callback_data=f"{category}:{page+1}"))
     if buttons:
-        await context.bot.send_message(chat_id=query.from_user.id, text="📺 Navigate:", reply_markup=InlineKeyboardMarkup([buttons]))
+        await (update.message or update.callback_query.message).reply_text(
+            "Navigation:", reply_markup=InlineKeyboardMarkup([buttons])
+        )
 
-# ---------------- ADMIN COMMANDS ----------------
-async def add_video_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------- ADMIN ----------------
+async def addvideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
-        return await update.message.reply_text("⛔ Not authorized")
-    if len(context.args) != 1:
-        return await update.message.reply_text("Usage: /addvideo <category>")
-    context.user_data["adding_category"] = context.args[0]
-    await update.message.reply_text(f"📤 Send a video to add to `{context.args[0]}`", parse_mode="Markdown")
+        return
+    if not update.message.video:
+        await update.message.reply_text("Send a video with caption = category")
+        return
+    category = update.message.caption or "general"
+    add_video_to_db(category, update.message.video.file_id)
+    await update.message.reply_text(f"✅ Video added to {category}")
 
-async def bulkadd_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def bulkadd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
-        return await update.message.reply_text("⛔ Not authorized")
+        return
     if len(context.args) != 1:
-        return await update.message.reply_text("Usage: /bulkadd <category>")
-    context.user_data["bulk_category"] = context.args[0]
+        await update.message.reply_text("Usage: /bulkadd <category>")
+        return
     context.user_data["bulk_mode"] = True
-    await update.message.reply_text(f"📤 Bulk mode started for `{context.args[0]}`. Send videos, then /done", parse_mode="Markdown")
+    context.user_data["bulk_category"] = context.args[0]
+    await update.message.reply_text(f"📤 Send multiple videos for `{context.args[0]}`, then /done")
 
-async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("bulk_mode"):
-        context.user_data.pop("bulk_mode")
-        context.user_data.pop("bulk_category", None)
-        await update.message.reply_text("✅ Bulk add finished.")
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("bulk_mode", None)
+    context.user_data.pop("bulk_category", None)
+    await update.message.reply_text("✅ Bulk add finished.")
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "adding_category" in context.user_data:
-        category = context.user_data.pop("adding_category")
-        add_video(category, update.message.video.file_id)
-        await update.message.reply_text(f"✅ Video added to `{category}`", parse_mode="Markdown")
-    elif context.user_data.get("bulk_mode"):
+    if context.user_data.get("bulk_mode"):
         category = context.user_data["bulk_category"]
-        add_video(category, update.message.video.file_id)
+        add_video_to_db(category, update.message.video.file_id)
+    elif "adding_category" in context.user_data:
+        category = context.user_data.pop("adding_category")
+        add_video_to_db(category, update.message.video.file_id)
+        await update.message.reply_text(f"✅ Video added to {category}")
 
-async def removevideo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def removevideo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
-        return await update.message.reply_text("⛔ Not authorized")
-    if len(context.args) != 2 or not context.args[1].isdigit():
-        return await update.message.reply_text("Usage: /removevideo <category> <index>")
-    category, index = context.args[0], int(context.args[1])
-    if remove_video(category, index):
-        await update.message.reply_text(f"🗑️ Removed video {index} from `{category}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("⚠️ Invalid category or index")
-
-async def fsub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return await update.message.reply_text("⛔ Not authorized")
-    if len(context.args) != 1:
-        return await update.message.reply_text("Usage: /fsub <invite_link>")
-    set_fsub_channel(context.args[0])
-    await update.message.reply_text(f"✅ Force sub channel set to `{context.args[0]}`", parse_mode="Markdown")
-
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM stats_shown WHERE user_id = ?", (uid,))
-    if cur.fetchone():
-        conn.close()
         return
-    cur.execute("INSERT INTO stats_shown (user_id) VALUES (?)", (uid,))
-    conn.commit()
-    conn.close()
-
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM chats WHERE type='private'")
-    user_count = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM chats WHERE type!='private'")
-    group_count = cur.fetchone()[0]
-    conn.close()
-
-    msg = f"📊 Bot Stats:\n👤 Users: {user_count}\n👥 Groups: {group_count}"
-    await update.message.reply_text(msg)
-    try:
-        await context.bot.send_message(LOG_CHANNEL_ID, f"📊 Stats requested by {uid}\n{msg}")
-    except Exception as e:
-        logger.error(f"Failed to log stats: {e}")
-
-async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_chat(update.chat_member.chat.id, update.chat_member.chat.type)
-
-# ---------------- MAIN ----------------
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # Command handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("addvideo", add_video_cmd))
-    app.add_handler(CommandHandler("bulkadd", bulkadd_cmd))
-    app.add_handler(CommandHandler("done", done_cmd))
-    app.add_handler(CommandHandler("removevideo", removevideo_cmd))
-    app.add_handler(CommandHandler("fsub", fsub_command))
-    app.add_handler(CommandHandler("stats", stats_cmd))
-
-    # Callback query
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    # Videos
-    app.add_handler(MessageHandler(filters.VIDEO, video_handler))
-
-    # Chat member updates
-    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
-
-    # Run webhook
-    if WEBHOOK_URL:
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f"{WEBHOOK_URL}/{TOKEN}")
+    if len(context.args) != 2 or not context.args[1].isdigit():
+        await update.message.reply_text("Usage: /removevideo <category> <index>")
+        return
+    category, index = context.args[0], int(context.args[1])
+    videos = get_videos(category)
+    if 0 <= index < len(videos):
+        file_id = videos[index]
+        cursor.execute("DELETE FROM videos WHERE file_id=?", (file_id,))
+        conn.commit()
+        await update.message.reply_text(f"🗑️ Removed video {index} from {category}")
     else:
-        app.run_polling()
+        await update.message.reply_text("⚠️ Invalid index or category")
 
-if __name__ == "__main__":
-    main()
+async def fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /fsub <invite_link>")
+        return
+    set_fsub_channel(context.args[0])
+    await update.message.reply_text(f"✅ Force sub channel set: {context.args[0]}")
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    await update.message.reply_text(f"📊 Total users: {total_users}")
+
+# ---------------- APPLICATION ----------------
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(category_select, pattern="^cat_"))
+app.add_handler(CallbackQueryHandler(button_handler))
+app.add_handler(CommandHandler("addvideo", addvideo))
+app.add_handler(CommandHandler("bulkadd", bulkadd))
+app.add_handler(CommandHandler("done", done))
+app.add_handler(MessageHandler(filters.VIDEO, video_handler))
+app.add_handler(CommandHandler("removevideo", removevideo))
+app.add_handler(CommandHandler("fsub", fsub))
+app.add_handler(CommandHandler("stats", stats))
+
+# ---------------- RUN WEBHOOK ----------------
+if WEBHOOK_URL:
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+    )
+else:
+    app.run_polling()
